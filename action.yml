@@ -23,6 +23,28 @@ inputs:
       You should prefer adjusting root-reserve-mb/temp-reserve-mb over using this option.
     required: false
     default: 'false'
+  use-btrfs:
+    description: 'Use BTRFS instead of ext4, defaults to "false" if unset.'
+    required: false
+    default: 'false'
+  btrfs-compression-algorithm:
+    description: 'Compress algorithm to use with BTRFS, defaults to "zstd" if unset.'
+    required: false
+    default: 'zstd'
+  btrfs-compression-level:
+    description: 'Compression level to use with BTRFS, defaults to "3".'
+    required: false
+    default: '3'
+  btrfs-force-compression:
+    description: 'Force compression on all data, may have better results and have an impact on CPU performance.'
+    required: false
+    default: 'false'
+  btrfs-discard-async:
+    description: |
+      Use asynchronous mode for BTRFS discard when overprovision-lvm set to "true", improves performance but also raises 
+      the risk of encountering out-of-disk-space situations.
+    required: false
+    default: 'false'
   build-mount-path:
     description: 'Absolute path to the mount point where the build space will be available, defaults to $GITHUB_WORKSPACE if unset.'
     required: false
@@ -90,6 +112,13 @@ runs:
           echo "  Temp reserve:      ${{ inputs.temp-reserve-mb }} MiB"
           echo "  Swap space:        ${{ inputs.swap-size-mb }} MiB"
           echo "  Overprovision LVM: ${{ inputs.overprovision-lvm }}"
+          echo "  Use BTRFS:         ${{ inputs.use-btrfs }}"
+          if [[ ${{ inputs.use-btrfs }} == 'true' ]]; then
+            echo "   | Compress alg:   ${{ inputs.btrfs-compression-algorithm }}"
+            echo "   | Compress level: ${{ inputs.btrfs-compression-level }}"
+            echo "   | Force compress: ${{ inputs.btrfs-force-compression }}"
+            echo "   | Discard async:  ${{ inputs.btrfs-discard-async }}"
+          fi
           echo "  Mount path:        ${BUILD_MOUNT_PATH}"
           echo "  Root PV loop path: ${{ inputs.pv-loop-path }}"
           echo "  Temp PV loop path: ${{ inputs.tmp-pv-loop-path }}"
@@ -177,12 +206,32 @@ runs:
           echo "Creating build volume"
           # create and mount build volume
           sudo lvcreate -l 100%FREE -n buildlv "${VG_NAME}"
-          if [[ ${{ inputs.overprovision-lvm }} == 'true' ]]; then
-            sudo mkfs.ext4 -m0 "/dev/mapper/${VG_NAME}-buildlv"
+          if [[ ${{ inputs.use-btrfs }} == 'true' ]]; then
+            if [[ ${{ inputs.btrfs-force-compression }} == 'true' ]]; then
+              BTRFS_COMPRESS_OPT="compress-force=${{ inputs.btrfs-compression-algorithm }}:${{ inputs.btrfs-compression-level }}"
+            else
+              BTRFS_COMPRESS_OPT="compress=${{ inputs.btrfs-compression-algorithm }}:${{ inputs.btrfs-compression-level }}"
+            fi
+            if [[ ${{ inputs.btrfs-discard-async }} == 'true' ]]; then
+              BTRFS_DISCARD_OPT="discard=async"
+            else
+              BTRFS_DISCARD_OPT="discard=sync"
+            fi
+            if [[ ${{ inputs.overprovision-lvm }} == 'true' ]]; then
+              sudo mkfs.btrfs -L buildlv -m single "/dev/mapper/${VG_NAME}-buildlv"
+              sudo mount -o "${BTRFS_COMPRESS_OPT},${BTRFS_DISCARD_OPT}" "/dev/mapper/${VG_NAME}-buildlv" "${BUILD_MOUNT_PATH}"
+            else
+              sudo mkfs.btrfs -L buildlv -m single -K "/dev/mapper/${VG_NAME}-buildlv"
+              sudo mount -o "${BTRFS_COMPRESS_OPT},nodiscard" "/dev/mapper/${VG_NAME}-buildlv" "${BUILD_MOUNT_PATH}"
+            fi
           else
-            sudo mkfs.ext4 -Enodiscard -m0 "/dev/mapper/${VG_NAME}-buildlv"
+            if [[ ${{ inputs.overprovision-lvm }} == 'true' ]]; then
+              sudo mkfs.ext4 -m0 "/dev/mapper/${VG_NAME}-buildlv"
+            else
+              sudo mkfs.ext4 -Enodiscard -m0 "/dev/mapper/${VG_NAME}-buildlv"
+            fi
+            sudo mount "/dev/mapper/${VG_NAME}-buildlv" "${BUILD_MOUNT_PATH}"
           fi
-          sudo mount "/dev/mapper/${VG_NAME}-buildlv" "${BUILD_MOUNT_PATH}"
           sudo chown -R "${{ inputs.build-mount-path-ownership }}" "${BUILD_MOUNT_PATH}"
 
           # if build mount path is a parent of $GITHUB_WORKSPACE, and has been deleted, recreate it
